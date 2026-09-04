@@ -5,8 +5,10 @@ import { resolve } from "node:path";
 const ROOT = resolve(import.meta.dirname, "../..", "..");
 const PORTABLE = resolve(ROOT, "scripts", "portable");
 const NATIVE_INDEX = resolve(ROOT, "native", "index.js");
+const NATIVE_PACKAGE = resolve(ROOT, "native", "package.json");
 const RELEASE_WORKFLOW = resolve(ROOT, ".github", "workflows", "release.yml");
 const LITE_CI_WORKFLOW = resolve(ROOT, ".github", "workflows", "lite-ci.yml");
+const NATIVE_MUSL_WORKFLOW = resolve(ROOT, ".github", "workflows", "native-musl-ci.yml");
 
 function read(name: string): string {
   return readFileSync(resolve(PORTABLE, name), "utf8");
@@ -35,8 +37,13 @@ describe("No-Node Lite distribution contract", () => {
     expect(source).toContain("server remains available");
     expect(source).toContain("F3017226-FE2A-4295-8BDF-00C3A9A7E4C5");
     expect(source).toContain("MicrosoftEdgeWebView2Setup.exe");
+    expect(source).toContain("CODEX_PROXY_ALLOW_WEBVIEW2_INSTALL");
+    expect(source).toContain("Download and install it from Microsoft now?");
+    expect(source).toContain("verifyWebView2BootstrapperSignature");
+    expect(source).toContain("WEBVIEW2_BOOTSTRAPPER_URL");
+    expect(source).not.toContain('join(PACKAGE_ROOT, "tools"');
     expect(source).toContain("falling back to the default browser");
-    expect(source).toContain("Run the packaged online installer now?");
+    expect(source).not.toContain("Run the packaged online installer now?");
   });
 
   it("resolves the POSIX launcher directory before starting Node", () => {
@@ -88,24 +95,28 @@ describe("No-Node Lite distribution contract", () => {
     expect(nativeSource).toContain("CreateMutexW");
     expect(nativeSource).toContain("FindWindowExW");
     expect(nativeSource).toContain("TRAY_ACTIVATE_INSTANCE");
+    expect(nativeSource).toContain("CODEX_PROXY_ALLOW_WEBVIEW2_INSTALL");
+    expect(nativeSource).toContain("second start");
   });
 
-  it("packages only runtime native files and creates a tar.xz archive", () => {
+  it("packages only runtime native files and creates a level-9 ZIP archive", () => {
     const source = read("build-portable.mjs");
     expect(source).toContain('name === "index.js"');
     expect(source).toContain('name.endsWith(".node")');
     expect(source).toContain('"type":"commonjs"');
     expect(source).not.toContain('copyDirectory(resolve(ROOT, "native")');
-    expect(source).toContain('"tar"');
-    expect(source).toContain('"-cf"');
-    expect(source).toContain("lzma.FORMAT_XZ");
+    expect(source).toContain("createZip");
+    expect(source).toContain('"-tzip"');
+    expect(source).toContain('"-mx=9"');
+    expect(source).toContain('"-9"');
+    expect(source).toContain("compresslevel=9");
     expect(source).toContain('"--version"');
     expect(source).toContain("PORTABLE_VERSION");
     expect(source).toContain("WebView2 host is not included");
     expect(source).toContain("--webview2-host-x86");
     expect(source).toContain("--webview2-host-x64");
-    expect(source).toContain("--webview2-bootstrapper");
-    expect(source).toContain("${target}.sha256");
+    expect(source).not.toContain("--webview2-bootstrapper");
+    expect(source).not.toContain("MicrosoftEdgeWebView2Setup.exe");
     expect(source).toContain("PORTABLE_MSYS2_ROOT");
     expect(source).toContain("mingw32");
     expect(source).toContain("-static-libgcc");
@@ -117,17 +128,16 @@ describe("No-Node Lite distribution contract", () => {
     expect(source).toContain("-lshell32");
     expect(source).toContain('join(stage, "codex-proxy.cmd")');
     expect(source).toContain("always included");
-    expect(source).toContain("createRawTar");
-    expect(source).toContain("normalizeTarModes");
-    expect(source).toContain("python-tarfile");
-    expect(source).toContain("0000755");
+    expect(source).toContain("python-zip-level-9");
+    expect(source).toContain("runtimeInstall");
+    expect(source).toContain("runtimeInstallUrl");
   });
 
   it("has a real archive-level portable test harness", () => {
     const source = readFileSync(resolve(PORTABLE, "test-portable.mjs"), "utf8");
     expect(source).toContain("--archive");
-    expect(source).toContain("tar.xz");
-    expect(source).toContain("codex-proxy.sh is not executable");
+    expect(source).toContain(".zip");
+    expect(source).toContain("codex-proxy.sh");
     expect(source).toContain("CODEX_PROXY_READY=");
     expect(source).toContain("--portable");
     expect(source).toContain("--test-native-launcher");
@@ -137,7 +147,7 @@ describe("No-Node Lite distribution contract", () => {
     expect(source).toContain("canonicalPath");
     expect(source).toContain("codex-proxy-lite");
     expect(source).toContain("nodeRuntimeEntries");
-    expect(source).toContain('const bootstrapperHash = bootstrapper + ".sha256"');
+    expect(source).toContain("Lite archive must not contain the online WebView2 Bootstrapper");
     expect(source).toContain("0x8664");
     expect(source).toContain("default data mode");
     expect(source).toContain("This package does not include Node.js.");
@@ -169,6 +179,51 @@ describe("No-Node Lite distribution contract", () => {
     }
   });
 
+  it("builds and verifies the Linux x64 musl native addon separately", () => {
+    const nativePackage = readFileSync(NATIVE_PACKAGE, "utf8");
+    expect(nativePackage).toContain('"build:linux-x64-musl"');
+    expect(nativePackage).toContain("x86_64-unknown-linux-musl");
+    expect(nativePackage).toContain("--js false");
+
+    const portableTest = readFileSync(resolve(PORTABLE, "test-portable.mjs"), "utf8");
+    expect(portableTest).toContain("--require-linux-x64-musl");
+    expect(portableTest).toContain("native/codex-tls.linux-x64-musl.node");
+
+    const muslSmoke = readFileSync(resolve(PORTABLE, "test-linux-x64-musl.mjs"), "utf8");
+    expect(muslSmoke).toContain("codex-tls.linux-x64-musl.node");
+    expect(muslSmoke).toContain("createRequire");
+    expect(muslSmoke).toContain("httpGet");
+    expect(muslSmoke).toContain("ELF");
+
+    const liteWorkflow = readFileSync(LITE_CI_WORKFLOW, "utf8");
+    expect(liteWorkflow).toContain("native-musl:");
+    expect(liteWorkflow).toContain("nodejs-rust:lts-alpine");
+    expect(liteWorkflow).toContain("lite-ci-native-linux-x64-musl");
+    expect(liteWorkflow).toContain("--require-linux-x64-musl");
+    expect(liteWorkflow).toContain("musl-smoke:");
+
+    const releaseWorkflow = readFileSync(RELEASE_WORKFLOW, "utf8");
+    expect(releaseWorkflow).toContain("native-musl:");
+    expect(releaseWorkflow).toContain("lite-native-linux-x64-musl");
+    expect(releaseWorkflow).toContain("needs: [build, native-musl]");
+    expect(releaseWorkflow).toContain("--require-linux-x64-musl");
+  });
+
+  it("provides a focused GitHub workflow for Linux x64 musl build and load testing", () => {
+    const workflow = readFileSync(NATIVE_MUSL_WORKFLOW, "utf8");
+    expect(workflow).toContain("name: Linux x64 musl native CI");
+    expect(workflow).toContain("workflow_dispatch:");
+    expect(workflow).toContain("nodejs-rust:lts-alpine");
+    expect(workflow).toContain("npm run build:linux-x64-musl");
+    expect(workflow).toContain("scripts/native/test-linux-x64-musl.mjs");
+    expect(workflow).toContain("readelf -d");
+    expect(workflow).toContain("readelf --version-info");
+    expect(workflow).toContain("codex-tls-linux-x64-musl");
+    expect(workflow).not.toContain("build-portable.mjs");
+    expect(workflow).not.toContain("test-portable.mjs");
+    expect(workflow).not.toContain("webview2");
+  });
+
   it("builds the WebView2 host through an MSYS2 MinGW compiler", () => {
     const source = read("build-webview2-host.mjs");
     const host = read("webview2-host.cpp");
@@ -189,13 +244,6 @@ describe("No-Node Lite distribution contract", () => {
     expect(source).toContain("stageWebView2HeadersForX86");
   });
 
-  it("downloads and validates the optional Evergreen Bootstrapper", () => {
-    const source = read("download-webview2-bootstrapper.mjs");
-    expect(source).toContain("https://go.microsoft.com/fwlink/?linkid=2124703");
-    expect(source).toContain("MZ");
-    expect(source).toContain("sha256");
-  });
-
   it("assembles one portable release asset from platform native artifacts", () => {
     const workflow = readFileSync(RELEASE_WORKFLOW, "utf8");
     expect(workflow).toContain("Upload native addon for Lite package");
@@ -204,8 +252,10 @@ describe("No-Node Lite distribution contract", () => {
     expect(workflow).toContain("msys2/setup-msys2@v2");
     expect(workflow).toContain("MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}");
     expect(workflow).not.toContain("ilammy/msvc-dev-cmd");
-    expect(workflow).toContain("Verify Evergreen WebView2 Bootstrapper signature");
-    expect(workflow).toContain("gh release upload \"$TAG\" portable-release/*.tar.xz");
+    expect(workflow).not.toContain("Verify Evergreen WebView2 Bootstrapper signature");
+    expect(workflow).not.toContain("--webview2-bootstrapper");
+    expect(workflow).toContain("gh release upload \"$TAG\" portable-release/*.zip");
+    expect(workflow).toContain("needs.build-lite.result != 'success'");
   });
 
   it("has an optional manually dispatched Lite CI workflow", () => {
@@ -214,10 +264,10 @@ describe("No-Node Lite distribution contract", () => {
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("contents: read");
     expect(workflow).toContain("codex-proxy-lite-${{ github.run_number }}");
-    expect(workflow).toContain("Build Lite tar.xz");
+    expect(workflow).toContain("Build Lite ZIP");
     expect(workflow).toContain("Build WebView2 hosts");
     expect(workflow).toContain("MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}");
-    expect(workflow).toContain("MicrosoftEdgeWebView2Setup.exe");
+    expect(workflow).not.toContain("MicrosoftEdgeWebView2Setup.exe");
     expect(workflow).toContain("test-portable.mjs");
     expect(workflow).toContain("cross-platform");
     expect(workflow).toContain("macos-latest");

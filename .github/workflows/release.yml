@@ -281,8 +281,53 @@ jobs:
           # One gh invocation per platform instead of one HTTP/API cycle per file.
           gh release upload "$TAG" "${files[@]}" --clobber
 
+  native-musl:
+    needs: notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Build Linux x64 musl native addon
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE/native:/build" \
+            -w /build \
+            ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine \
+            sh -lc 'set -eu; rustup target add x86_64-unknown-linux-musl; npm ci --ignore-scripts --no-audit --no-fund; npm run build:linux-x64-musl'
+
+      - name: Inspect Linux x64 musl native addon
+        shell: bash
+        run: |
+          addon="native/codex-tls.linux-x64-musl.node"
+          test -f "$addon"
+          file_output="$(file "$addon")"
+          echo "$file_output"
+          echo "$file_output" | grep -Eq 'ELF 64-bit.*x86-64'
+          if readelf -d "$addon" | grep -Eq 'libc\.so\.6|ld-linux-x86-64\.so\.2'; then
+            echo "::error::musl addon unexpectedly depends on glibc"
+            exit 1
+          fi
+          if readelf --version-info "$addon" 2>/dev/null | grep -q 'GLIBC_'; then
+            echo "::error::musl addon contains a GLIBC symbol requirement"
+            exit 1
+          fi
+
+      - name: Upload Linux x64 musl native addon for Lite package
+        uses: actions/upload-artifact@v4
+        with:
+          name: lite-native-linux-x64-musl
+          path: native/codex-tls.linux-x64-musl.node
+          if-no-files-found: error
+          retention-days: 1
+
   build-lite:
-    needs: build
+    needs: [build, native-musl]
     runs-on: windows-latest
     timeout-minutes: 35
     env:
@@ -345,21 +390,7 @@ jobs:
           node scripts/portable/build-webview2-host.mjs --arch x86 --out "$hostDir\win-x86\webview2-host.exe"
           node scripts/portable/build-webview2-host.mjs --arch x64 --out "$hostDir\win-x64\webview2-host.exe"
 
-      - name: Download Evergreen WebView2 Bootstrapper
-        shell: pwsh
-        run: |
-          $path = Join-Path $env:RUNNER_TEMP "codex-proxy-webview2\MicrosoftEdgeWebView2Setup.exe"
-          node scripts/portable/download-webview2-bootstrapper.mjs --out $path
-
-      - name: Verify Evergreen WebView2 Bootstrapper signature
-        shell: pwsh
-        run: |
-          $path = Join-Path $env:RUNNER_TEMP "codex-proxy-webview2\MicrosoftEdgeWebView2Setup.exe"
-          $signature = Get-AuthenticodeSignature -LiteralPath $path
-          if ($signature.Status -ne "Valid") { throw "Invalid WebView2 Bootstrapper signature: $($signature.Status)" }
-          if ($signature.SignerCertificate.Subject -notmatch "Microsoft") { throw "Unexpected WebView2 Bootstrapper signer: $($signature.SignerCertificate.Subject)" }
-
-      - name: Build Lite tar.xz
+      - name: Build Lite ZIP
         env:
           MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
           PORTABLE_REQUIRE_WINDOWS_EXE: "1"
@@ -368,14 +399,13 @@ jobs:
           $hostDir = Join-Path $env:RUNNER_TEMP "codex-proxy-webview2"
           node scripts/portable/build-portable.mjs --version $version `
             --webview2-host-x86 "$hostDir\win-x86\webview2-host.exe" `
-            --webview2-host-x64 "$hostDir\win-x64\webview2-host.exe" `
-            --webview2-bootstrapper "$hostDir\MicrosoftEdgeWebView2Setup.exe"
+            --webview2-host-x64 "$hostDir\win-x64\webview2-host.exe"
 
       - name: Smoke test Lite archive
         shell: pwsh
         run: |
-          $archive = (Get-ChildItem portable-release\*.tar.xz | Select-Object -First 1).FullName
-          node scripts/portable/test-portable.mjs --archive $archive --require-windows-exe --require-webview2 --test-native-launcher
+          $archive = (Get-ChildItem portable-release\*.zip | Select-Object -First 1).FullName
+          node scripts/portable/test-portable.mjs --archive $archive --require-windows-exe --require-webview2 --require-linux-x64-musl --test-native-launcher
 
       - name: Upload Lite artifact
         shell: bash
@@ -383,7 +413,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ inputs.tag || github.ref_name }}"
-          gh release upload "$TAG" portable-release/*.tar.xz --clobber
+          gh release upload "$TAG" portable-release/*.zip --clobber
 
   # Merge the two architecture-specific mac manifests after both mac builds
   # have completed. This job is tiny and removes the old full x64 serial build.
@@ -452,7 +482,7 @@ jobs:
 
       - name: Mark stable release as latest (assets are complete now)
         id: flip
-        if: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+        if: ${{ needs.notes.result == 'success' && needs.build.result == 'success' && needs.merge-mac-manifest.result == 'success' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
@@ -488,8 +518,12 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ inputs.tag || github.ref_name }}
         run: |
-          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || steps.flip.outcome == 'failure' }}" = "true" ]; then
+          CORE_FAILED="${{ needs.notes.result != 'success' || needs.build.result != 'success' || needs.merge-mac-manifest.result != 'success' || steps.flip.outcome == 'failure' }}"
+          LITE_FAILED="${{ needs.build-lite.result != 'success' }}"
+          if [ "$CORE_FAILED" = "true" ]; then
             MSG="❌ Release $TAG failed: $RUN_URL"
+          elif [ "$LITE_FAILED" = "true" ]; then
+            MSG="⚠️ Release $TAG published, but the optional Lite artifact failed: $RUN_URL"
           else
             MSG="✅ Release $TAG published: $RELEASE_URL"
           fi

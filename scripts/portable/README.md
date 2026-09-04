@@ -5,7 +5,7 @@ the bundled backend and web assets, but does not contain Node.js. It uses the
 same per-user data directory as Electron by default; pass `--portable` when
 you explicitly want runtime data beside the package.
 
-After extracting the `tar.xz` archive, the top-level entry points are:
+After extracting the ZIP archive, the top-level entry points are:
 
 - `codex-proxy.exe` on Windows when the native launcher was built;
 - `codex-proxy.cmd` on Windows, always included as a script fallback;
@@ -67,23 +67,22 @@ The resulting package includes the MIT notice for the `webview` library.
 
 The WebView2 Runtime is not bundled. If the target machine does not have it,
 the default `auto` mode falls back to the browser. Explicit
-`--mode=webview2` reports the missing Runtime and asks whether to run the
-optional Evergreen Bootstrapper. The question times out without installing
-anything if there is no response. The Bootstrapper can install it online:
+`--mode=webview2` reports the missing Runtime and asks whether to download and
+run the optional Evergreen Bootstrapper. The question times out without
+installing anything if there is no response. The Bootstrapper is downloaded to
+a temporary directory only after confirmation, its Authenticode signature is
+checked, and it is then run with `/silent /install`:
 
 ```text
-npm run download:webview2-bootstrapper -- --out PATH
 node scripts/portable/build-portable.mjs \
   --webview2-host-x86 PATH\\win-x86\\webview2-host.exe \
-  --webview2-host-x64 PATH\\win-x64\\webview2-host.exe \
-  --webview2-bootstrapper PATH\\MicrosoftEdgeWebView2Setup.exe
+  --webview2-host-x64 PATH\\win-x64\\webview2-host.exe
 ```
 
-The package places the installer at
-`tools/MicrosoftEdgeWebView2Setup.exe` and writes its SHA-256 beside it. The
-installer is a small online downloader; it requires internet access and does
-not replace the WebView2 host or install Node.js. Run it explicitly with
-`/silent /install` after user confirmation. Evergreen WebView2 supports
+The package does not contain `MicrosoftEdgeWebView2Setup.exe` or its hash
+sidecar. The installer is a small online downloader; it requires internet
+access to obtain the Runtime and does not replace the WebView2 host or install
+Node.js. Evergreen WebView2 supports
 Windows 10 SAC 1709 and later, supported Windows 10 LTSC/IoT editions,
 Windows 11, and the supported Windows Server editions. Windows 7 and 8.1 are
 outside the current Evergreen support target.
@@ -109,9 +108,17 @@ data switches between the Electron-compatible user directory and package-local
 `data/`.
 
 The package is intentionally bring-your-own-Node. It does not silently
-download or execute Node.js or the WebView2 Runtime. The optional Bootstrapper
-is downloaded from Microsoft's official endpoint during packaging, checked as
-a Windows executable, and verified by the Windows CI job's Authenticode check.
+download or execute Node.js. The optional WebView2 Bootstrapper is downloaded
+from Microsoft's official endpoint at runtime only after user confirmation,
+checked as a Windows executable, and verified with Windows Authenticode before
+it is executed.
+
+The Lite archive includes both Linux x64 native TLS variants:
+`native/codex-tls.linux-x64-gnu.node` for glibc systems and
+`native/codex-tls.linux-x64-musl.node` for musl systems such as Alpine. The
+musl artifact is a Node-API native addon, not a standalone static server; the
+package still requires a compatible Node.js runtime. Alpine smoke testing also
+requires the image's normal CA certificate package for outbound HTTPS.
 
 The Windows native launcher is a small x86 PE built with the MSYS2 MinGW-w64
 `mingw32` toolchain and the Windows GUI subsystem. It statically links the
@@ -129,12 +136,12 @@ the script launcher.
 
 ## Distribution tests
 
-The archive-level test reads the generated tar.xz, checks its layout and Unix
-modes, and runs the package from an unrelated working directory. It also
+The archive-level test reads the generated ZIP, checks its layout, and runs the
+package from an unrelated working directory. It also
 checks the current host's native addon, the no-Node guidance, the server HTTP
 smoke path, browser URL forwarding, and the non-Windows WebView2 error:
 
-    npm run test:lite -- --archive portable-release/codex-proxy-2.0.77-no-node-lite-all-platforms.tar.xz
+    npm run test:lite -- --archive portable-release/codex-proxy-2.0.77-no-node-lite-all-platforms.zip
 
 On an isolated Windows runner, add `--test-native-launcher` to also start the
 native `codex-proxy.exe`. The native launcher uses a single-instance mutex, so
@@ -142,7 +149,9 @@ this option should not be run while another Lite/Electron launcher is active
 for the same user session.
 
 CI runs the same test on Windows, macOS, and Linux. The native build matrix
-also checks the platform/architecture-specific .node files. Unsupported
-architectures are covered by the loader contract test; they require a
-matching native build or emulator before they can be promoted to runtime
-smoke tests.
+also checks the platform/architecture-specific .node files. The Lite package
+build passes `--require-linux-x64-musl` so a release cannot silently omit the
+Linux musl addon. A separate Alpine container test loads the packaged loader
+and performs a local native HTTP request. Unsupported architectures are
+covered by the loader contract test; they require a matching native build or
+emulator before they can be promoted to runtime smoke tests.

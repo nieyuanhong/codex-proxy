@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, chmodSync, renameSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,13 +16,12 @@ function parseArgs(argv) {
     webview2HostX86: process.env.PORTABLE_WEBVIEW2_HOST_X86 ?? null,
     webview2HostX64: process.env.PORTABLE_WEBVIEW2_HOST_X64 ?? null,
     webview2HostArm64: process.env.PORTABLE_WEBVIEW2_HOST_ARM64 ?? null,
-    webview2Bootstrapper: process.env.PORTABLE_WEBVIEW2_BOOTSTRAPPER ?? null,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if ([
       "--out", "--version", "--webview2-host", "--webview2-host-x86",
-      "--webview2-host-x64", "--webview2-host-arm64", "--webview2-bootstrapper",
+      "--webview2-host-x64", "--webview2-host-arm64",
     ].includes(arg)) {
       const value = argv[++i];
       if (!value) throw new Error(`${arg} requires a value`);
@@ -32,8 +30,7 @@ function parseArgs(argv) {
       else if (arg === "--webview2-host") options.webview2Host = resolve(value);
       else if (arg === "--webview2-host-x86") options.webview2HostX86 = resolve(value);
       else if (arg === "--webview2-host-x64") options.webview2HostX64 = resolve(value);
-      else if (arg === "--webview2-host-arm64") options.webview2HostArm64 = resolve(value);
-      else options.webview2Bootstrapper = resolve(value);
+      else options.webview2HostArm64 = resolve(value);
     } else if (arg.startsWith("--out=")) {
       options.out = resolve(arg.slice("--out=".length));
     } else if (arg.startsWith("--version=")) {
@@ -46,8 +43,6 @@ function parseArgs(argv) {
       options.webview2HostX64 = resolve(arg.slice("--webview2-host-x64=".length));
     } else if (arg.startsWith("--webview2-host-arm64=")) {
       options.webview2HostArm64 = resolve(arg.slice("--webview2-host-arm64=".length));
-    } else if (arg.startsWith("--webview2-bootstrapper=")) {
-      options.webview2Bootstrapper = resolve(arg.slice("--webview2-bootstrapper=".length));
     } else {
       throw new Error(`Unknown option: ${arg}`);
     }
@@ -253,107 +248,58 @@ function copyWebView2Hosts(options, destination) {
   return included;
 }
 
-function copyWebView2Bootstrapper(source, destination) {
-  if (!source) return null;
-  requirePath(source, "WebView2 Evergreen Bootstrapper");
-  const target = join(destination, "tools", "MicrosoftEdgeWebView2Setup.exe");
-  mkdirSync(dirname(target), { recursive: true });
-  const content = readFileSync(source);
-  const sha256 = createHash("sha256").update(content).digest("hex");
-  writeFileSync(target, content);
-  writeFileSync(`${target}.sha256`, `${sha256}  MicrosoftEdgeWebView2Setup.exe\r\n`);
-  return { file: "tools/MicrosoftEdgeWebView2Setup.exe", bytes: content.length, sha256 };
-}
-
-function normalizeTarModes(rawTar) {
-  const content = readFileSync(rawTar);
-  let normalized = 0;
-  for (let offset = 0; offset + 512 <= content.length; offset += 512) {
-    const field = (start, length) => content.subarray(offset + start, offset + start + length)
-      .toString("utf8")
-      .replace(/\0.*$/s, "");
-    const name = field(0, 100);
-    const prefix = field(345, 155);
-    const fullName = `${prefix ? `${prefix}/` : ""}${name}`.replace(/^\.\//, "");
-    if (fullName !== "codex-proxy.sh" && !fullName.endsWith("/codex-proxy.sh")) continue;
-
-    // Windows tar implementations commonly write all regular files as 0666,
-    // even when chmodSync() set the executable bit in the staging directory.
-    // Rewrite the POSIX mode and checksum in the raw ustar header so the bit
-    // survives extraction on Linux and macOS.
-    content.write("0000755\0 ", offset + 100, 8, "ascii");
-    content.fill(0x20, offset + 148, offset + 156);
-    let checksum = 0;
-    for (let i = offset; i < offset + 512; i += 1) checksum += content[i];
-    content.write(`${checksum.toString(8).padStart(6, "0")}\0 `, offset + 148, 8, "ascii");
-    normalized += 1;
+function createZip(stage, archive) {
+  if (commandExists("7z")) {
+    execFileSync("7z", ["a", "-tzip", "-mx=9", "-mmt=on", archive, "."], {
+      cwd: stage,
+      stdio: "inherit",
+      windowsHide: true,
+    });
+    return "7z-zip-mx9";
   }
-  if (normalized === 0) throw new Error("The raw tar archive did not contain codex-proxy.sh");
-  writeFileSync(rawTar, content);
-}
 
-function createRawTar(stage, rawTar) {
-  // Python's tarfile lets us set POSIX modes explicitly and behaves the same
-  // on Windows, macOS, and Linux. It is already an optional packaging
-  // dependency for the XZ fallback, so do not add an npm dependency here.
+  if (commandExists("zip")) {
+    execFileSync("zip", ["-9", "-q", "-r", archive, "."], {
+      cwd: stage,
+      stdio: "inherit",
+      windowsHide: true,
+    });
+    return "zip-9";
+  }
+
+  // Python's standard library is the portable fallback. ZipFile's
+  // compression level is explicitly set to 9, and POSIX mode bits are kept
+  // as metadata when the source filesystem provides them. ZIP extraction on
+  // Windows does not restore execute bits, so the archive test restores the
+  // shell bit before running the POSIX launcher.
   const pythonScript = [
-    "import sys, tarfile",
-    "stage, output = sys.argv[1:3]",
-    "def normalize(info):",
-    "    normalized = info.name.replace('\\\\', '/')",
-    "    if normalized == 'codex-proxy.sh' or normalized.endswith('/codex-proxy.sh'):",
-    "        info.mode = 0o755",
-    "    return info",
-    "with tarfile.open(output, 'w') as archive:",
-    "    archive.add(stage, arcname='.', recursive=True, filter=normalize)",
+    "import pathlib, stat, sys, zipfile",
+    "stage, output = map(pathlib.Path, sys.argv[1:3])",
+    "with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:",
+    "    for path in sorted(stage.rglob('*')):",
+    "        relative = path.relative_to(stage).as_posix()",
+    "        if path.is_dir():",
+    "            info = zipfile.ZipInfo(relative + '/')",
+    "            info.compress_type = zipfile.ZIP_STORED",
+    "            info.external_attr = ((stat.S_IFDIR | 0o755) << 16) | 0x10",
+    "            archive.writestr(info, b'')",
+    "        else:",
+    "            info = zipfile.ZipInfo(relative)",
+    "            info.compress_type = zipfile.ZIP_DEFLATED",
+    "            info.external_attr = (path.stat().st_mode & 0o7777) << 16",
+    "            archive.writestr(info, path.read_bytes())",
   ].join("\n");
   for (const python of ["python", "python3"]) {
     if (!commandExists(python)) continue;
-    const result = spawnSync(python, ["-c", pythonScript, stage, rawTar], {
+    const result = spawnSync(python, ["-c", pythonScript, stage, archive], {
       encoding: "utf8",
       windowsHide: true,
     });
-    if (result.status === 0) return "python-tarfile";
-    console.warn(`[portable] ${python} tar creation failed: ${result.stderr || result.stdout}`);
+    if (result.status === 0) return "python-zip-level-9";
+    console.warn(`[portable] ${python} ZIP creation failed: ${result.stderr || result.stdout}`);
   }
 
-  execFileSync("tar", ["-cf", rawTar, "-C", stage, "."], { stdio: "inherit" });
-  normalizeTarModes(rawTar);
-  return "tar+normalized-modes";
-}
-
-function compressTarXz(stage, archive, tempRoot) {
-  const rawTar = join(tempRoot, "codex-proxy.tar");
-  rmSync(rawTar, { force: true });
-  rmSync(`${rawTar}.xz`, { force: true });
-  try {
-    const tarMethod = createRawTar(stage, rawTar);
-
-    if (commandExists("xz")) {
-      execFileSync("xz", ["-9", "-f", rawTar], { stdio: "inherit" });
-      renameSync(`${rawTar}.xz`, archive);
-      return `${tarMethod}+xz`;
-    }
-
-    // Windows Developer/PyManager installations often have Python but no xz.
-    // Python's standard library provides the same XZ/LZMA container without a
-    // new npm dependency. This is a packaging fallback, not a runtime dependency.
-    for (const python of ["python", "python3"]) {
-      if (!commandExists(python)) continue;
-      const result = spawnSync(python, ["-c", [
-        "import lzma, shutil, sys",
-        "with open(sys.argv[1], 'rb') as source, lzma.open(sys.argv[2], 'wb', preset=9, format=lzma.FORMAT_XZ) as target:",
-        "    shutil.copyfileobj(source, target)",
-      ].join("\n"), rawTar, archive], { encoding: "utf8", windowsHide: true });
-      if (result.status === 0) return `${tarMethod}+python-lzma`;
-      console.warn(`[portable] ${python} XZ fallback failed: ${result.stderr || result.stdout}`);
-    }
-
-    throw new Error("No XZ compressor found. Install xz, 7-Zip, or Python 3 to create the tar.xz archive.");
-  } finally {
-    rmSync(rawTar, { force: true });
-    rmSync(`${rawTar}.xz`, { force: true });
-  }
+  throw new Error("No ZIP compressor found. Install 7-Zip, zip, or Python 3 to create the ZIP archive.");
 }
 
 function main() {
@@ -364,7 +310,7 @@ function main() {
   requirePath(resolve(ROOT, "public", "index.html"), "built web assets; run npm run build first");
 
   const stage = resolve(options.out, ".staging", "codex-proxy");
-  const archive = resolve(options.out, `codex-proxy-${version}-no-node-lite-all-platforms.tar.xz`);
+  const archive = resolve(options.out, `codex-proxy-${version}-no-node-lite-all-platforms.zip`);
   rmSync(stage, { recursive: true, force: true });
   mkdirSync(stage, { recursive: true });
   mkdirSync(options.out, { recursive: true });
@@ -374,7 +320,6 @@ function main() {
   cpSync(BUNDLE, join(app, "server-bundle.mjs"));
   cpSync(resolve(SCRIPT_DIR, "server.mjs"), join(app, "server.mjs"));
   const webview2Hosts = copyWebView2Hosts(options, stage);
-  const webview2Bootstrapper = copyWebView2Bootstrapper(options.webview2Bootstrapper, stage);
   writeFileSync(join(app, "manifest.json"), JSON.stringify({
     name: "codex-proxy-lite",
     version,
@@ -383,7 +328,9 @@ function main() {
     modes: ["server", "browser", "auto", "webview2"],
     webview2: {
       hostArchitectures: webview2Hosts,
-      bootstrapper: webview2Bootstrapper,
+      bootstrapper: null,
+      runtimeInstall: "online-bootstrapper",
+      runtimeInstallUrl: "https://go.microsoft.com/fwlink/?linkid=2124703",
       supportedWindows: "Windows 10 SAC 1709+ and supported Windows 10 LTSC/IoT/Server editions; Windows 11",
     },
   }, null, 2) + "\n");
@@ -404,7 +351,7 @@ function main() {
   cpSync(resolve(SCRIPT_DIR, "codex-proxy.cmd"), join(stage, "codex-proxy.cmd"));
 
   rmSync(archive, { force: true });
-  const compressor = compressTarXz(stage, archive, resolve(options.out, ".staging"));
+  const compressor = createZip(stage, archive);
   rmSync(resolve(options.out, ".staging"), { recursive: true, force: true });
 
   console.log(`[lite] archive: ${archive}`);
@@ -412,7 +359,7 @@ function main() {
   console.log(`[lite] Windows launcher: ${hasWindowsExe ? "codex-proxy.exe (MSYS2 MinGW x86)" : "codex-proxy.cmd fallback"}`);
   console.log("[lite] Windows script fallback: codex-proxy.cmd (always included)");
   console.log(`[lite] WebView2 host: ${webview2Hosts.length ? webview2Hosts.join(", ") : "not included"}`);
-  console.log(`[lite] WebView2 Bootstrapper: ${webview2Bootstrapper ? `${webview2Bootstrapper.bytes} bytes` : "not included"}`);
+  console.log("[lite] WebView2 Bootstrapper: not bundled; downloaded online after user confirmation");
 }
 
 main();

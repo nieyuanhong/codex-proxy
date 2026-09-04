@@ -9,7 +9,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { createServer } from "node:net";
 import { basename, delimiter, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -20,6 +19,7 @@ function parseArgs(argv) {
     keep: false,
     requireWindowsExe: false,
     requireWebView2: false,
+    requireLinuxX64Musl: false,
     testNativeLauncher: false,
     skipRuntime: false,
   };
@@ -28,6 +28,7 @@ function parseArgs(argv) {
     if (arg === "--keep") options.keep = true;
     else if (arg === "--require-windows-exe") options.requireWindowsExe = true;
     else if (arg === "--require-webview2") options.requireWebView2 = true;
+    else if (arg === "--require-linux-x64-musl") options.requireLinuxX64Musl = true;
     else if (arg === "--test-native-launcher") options.testNativeLauncher = true;
     else if (arg === "--skip-runtime") options.skipRuntime = true;
     else if (arg === "--archive") options.archive = argv[++i];
@@ -88,15 +89,24 @@ function canonicalPath(path) {
 
 function extractArchive(archive, destination) {
   const python = findPython();
-  if (!python) throw new Error("Python 3 is required by the portable archive test to read tar.xz metadata");
-  const script = [
-    "import json, sys, tarfile",
-    "archive, destination = sys.argv[1:3]",
-    "with tarfile.open(archive, 'r:xz') as source:",
-    "    members = source.getmembers()",
-    "    source.extractall(destination)",
-    "print(json.dumps([{'name': m.name, 'mode': m.mode, 'size': m.size, 'isfile': m.isfile()} for m in members]))",
-  ].join("\n");
+  if (!python) throw new Error("Python 3 is required by the portable archive test to read ZIP metadata");
+  const script = /\.zip$/i.test(archive)
+    ? [
+      "import json, sys, zipfile",
+      "archive, destination = sys.argv[1:3]",
+      "with zipfile.ZipFile(archive, 'r') as source:",
+      "    members = source.infolist()",
+      "    source.extractall(destination)",
+      "print(json.dumps([{'name': m.filename, 'mode': (m.external_attr >> 16) & 0o7777, 'size': m.file_size, 'isfile': not m.is_dir()} for m in members]))",
+    ].join("\n")
+    : [
+      "import json, sys, tarfile",
+      "archive, destination = sys.argv[1:3]",
+      "with tarfile.open(archive, 'r:xz') as source:",
+      "    members = source.getmembers()",
+      "    source.extractall(destination)",
+      "print(json.dumps([{'name': m.name, 'mode': m.mode, 'size': m.size, 'isfile': m.isfile()} for m in members]))",
+    ].join("\n");
   const result = runSync(python, ["-c", script, archive, destination], { timeout: 30_000 });
   if (result.error || result.status !== 0) {
     throw new Error(
@@ -169,18 +179,18 @@ function archiveContract(entries, extract, options) {
   const shellEntry = files.get("codex-proxy.sh");
   assert(shellEntry, "Portable archive is missing the shell launcher file entry");
   assert(
-    (shellEntry.mode & 0o111) !== 0,
-    "codex-proxy.sh is not executable in the archive (mode " + shellEntry.mode.toString(8) + ")",
+    !/\.tar\.xz$/i.test(options.archive) || (shellEntry.mode & 0o111) !== 0,
+    "codex-proxy.sh is not executable in the POSIX archive (mode " + shellEntry.mode.toString(8) + ")",
   );
   assert(
-    (shellEntry.mode & 0o777) === 0o755,
-    "codex-proxy.sh must have mode 0755 in the archive (mode " + shellEntry.mode.toString(8) + ")",
+    !/\.tar\.xz$/i.test(options.archive) || (shellEntry.mode & 0o777) === 0o755,
+    "codex-proxy.sh must have mode 0755 in the POSIX archive (mode " + shellEntry.mode.toString(8) + ")",
   );
 
   const manifest = JSON.parse(readFileSync(join(extract, "app", "manifest.json"), "utf8"));
   assert(manifest.name === "codex-proxy-lite", "Lite manifest has an unexpected name: " + manifest.name);
   assert(typeof manifest.version === "string" && manifest.version.length > 0, "Lite manifest has no version");
-  const versionMatch = /^codex-proxy-(.+)-no-node-lite-all-platforms\.tar\.xz$/i.exec(basename(options.archive));
+  const versionMatch = /^codex-proxy-(.+)-no-node-lite-all-platforms\.(?:zip|tar\.xz)$/i.exec(basename(options.archive));
   if (versionMatch) {
     assert(manifest.version === versionMatch[1],
       "Lite manifest version " + manifest.version + " does not match archive version " + versionMatch[1]);
@@ -191,6 +201,11 @@ function archiveContract(entries, extract, options) {
     JSON.stringify(manifest.modes) === JSON.stringify(["server", "browser", "auto", "webview2"]),
     "Portable modes changed unexpectedly",
   );
+  assert(manifest.webview2?.bootstrapper === null, "Lite manifest must not advertise a bundled Bootstrapper");
+  assert(manifest.webview2?.runtimeInstall === "online-bootstrapper",
+    "Lite manifest must advertise online WebView2 installation");
+  assert(manifest.webview2?.runtimeInstallUrl === "https://go.microsoft.com/fwlink/?linkid=2124703",
+    "Lite manifest has an unexpected WebView2 installation URL");
   const nativePackage = JSON.parse(readFileSync(join(extract, "native", "package.json"), "utf8"));
   assert(nativePackage.type === "commonjs", "Portable native loader must have a CommonJS package boundary");
 
@@ -201,6 +216,12 @@ function archiveContract(entries, extract, options) {
 
   const nativeFiles = [...files.keys()].filter((name) => name.startsWith("native/") && name.endsWith(".node"));
   assert(nativeFiles.length > 0, "Portable archive does not contain any native addon");
+  if (options.requireLinuxX64Musl) {
+    assert(
+      nativeFiles.includes("native/codex-tls.linux-x64-musl.node"),
+      "Portable archive is missing native/codex-tls.linux-x64-musl.node",
+    );
+  }
   const candidates = nativeCandidates(process.platform, process.arch);
   if (candidates.length > 0) {
     assert(
@@ -237,17 +258,10 @@ function archiveContract(entries, extract, options) {
     assert(hostFiles.includes("hosts/webview2/win-x86/webview2-host.exe"), "x86 WebView2 host is missing");
     assert(hostFiles.includes("hosts/webview2/win-x64/webview2-host.exe"), "x64 WebView2 host is missing");
   }
-  const bootstrapper = "tools/MicrosoftEdgeWebView2Setup.exe";
-  const bootstrapperHash = bootstrapper + ".sha256";
-  if (names.has(bootstrapper)) {
-    assert(names.has(bootstrapperHash), "WebView2 Bootstrapper hash sidecar is missing");
-    const actualHash = createHash("sha256").update(readFileSync(join(extract, bootstrapper))).digest("hex");
-    const sidecar = readFileSync(join(extract, bootstrapperHash), "utf8").trim();
-    assert(new RegExp("^" + actualHash + "\\s+MicrosoftEdgeWebView2Setup\\.exe$").test(sidecar),
-      "WebView2 Bootstrapper SHA-256 sidecar does not match the packaged installer");
-  } else {
-    assert(!names.has(bootstrapperHash), "WebView2 Bootstrapper hash sidecar exists without the installer");
-  }
+  assert(!names.has("tools/MicrosoftEdgeWebView2Setup.exe"),
+    "Lite archive must not contain the online WebView2 Bootstrapper");
+  assert(!names.has("tools/MicrosoftEdgeWebView2Setup.exe.sha256"),
+    "Lite archive must not contain a Bootstrapper hash sidecar");
   return { files, nativeFiles, hostFiles };
 }
 
@@ -618,6 +632,11 @@ async function main() {
   try {
     const entries = extractArchive(options.archive, extract);
     const summary = archiveContract(entries, extract, options);
+    if (/\.zip$/i.test(options.archive) && process.platform !== "win32") {
+      // ZIP is the Windows-friendly primary artifact and does not reliably
+      // restore POSIX execute bits across extractors.
+      chmodSync(join(extract, "codex-proxy.sh"), 0o755);
+    }
     launcherSmoke(extract, outside, options);
     noNodeSmoke(extract, outside, tempRoot);
     if (!options.skipRuntime) {

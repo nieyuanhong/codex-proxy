@@ -1,7 +1,7 @@
-import { existsSync } from "node:fs";
-import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -9,6 +9,8 @@ const APP_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(APP_DIR, "..");
 const WEBVIEW2_RUNTIME_GUID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
 const WEBVIEW2_INSTALL_HELP_URL = "https://developer.microsoft.com/microsoft-edge/webview2/";
+const WEBVIEW2_BOOTSTRAPPER_URL = "https://go.microsoft.com/fwlink/?linkid=2124703";
+const WEBVIEW2_INSTALL_APPROVED_ENV = "CODEX_PROXY_ALLOW_WEBVIEW2_INSTALL";
 const PROMPT_TIMEOUT_MS = 15_000;
 const ELECTRON_USER_DATA_SCOPE = ["@codex-proxy", "electron"];
 
@@ -166,12 +168,6 @@ function askYesNoWithTimeout(question, timeoutMs = PROMPT_TIMEOUT_MS) {
   });
 }
 
-function resolveWebView2Bootstrapper() {
-  const configured = process.env.CODEX_PROXY_WEBVIEW2_BOOTSTRAPPER;
-  if (configured) return resolve(PACKAGE_ROOT, configured);
-  return join(PACKAGE_ROOT, "tools", "MicrosoftEdgeWebView2Setup.exe");
-}
-
 function runWebView2Installer(installer) {
   return new Promise((resolveResult) => {
     let child;
@@ -192,6 +188,66 @@ function runWebView2Installer(installer) {
     });
     child.once("close", (code) => resolveResult(code ?? 1));
   });
+}
+
+function verifyWebView2BootstrapperSignature(installer) {
+  const escapedPath = installer.replaceAll("'", "''");
+  const script = [
+    `$signature = Get-AuthenticodeSignature -LiteralPath '${escapedPath}'`,
+    "if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft') {",
+    "  Write-Error \"Unexpected WebView2 Bootstrapper signature\"",
+    "  exit 1",
+    "}",
+  ].join("; ");
+  const result = spawnSync("powershell.exe", [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy", "Bypass",
+    "-Command", script,
+  ], { encoding: "utf8", windowsHide: true });
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      "Could not verify the Microsoft WebView2 Bootstrapper signature" +
+      (result.stderr || result.error?.message ? `: ${result.stderr || result.error?.message}` : ""),
+    );
+  }
+}
+
+async function downloadWebView2Bootstrapper() {
+  const tempRoot = mkdtempSync(join(tmpdir(), "codex-proxy-webview2-"));
+  const installer = join(tempRoot, "MicrosoftEdgeWebView2Setup.exe");
+  try {
+    console.log(`[Portable] Downloading WebView2 Bootstrapper from ${WEBVIEW2_BOOTSTRAPPER_URL}`);
+    const response = await fetch(WEBVIEW2_BOOTSTRAPPER_URL, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const content = Buffer.from(await response.arrayBuffer());
+    if (content.length < 2 || content[0] !== 0x4d || content[1] !== 0x5a) {
+      throw new Error("the downloaded file is not a Windows executable");
+    }
+    writeFileSync(installer, content, { mode: 0o700 });
+    verifyWebView2BootstrapperSignature(installer);
+    return { installer, tempRoot };
+  } catch (error) {
+    rmSync(tempRoot, { recursive: true, force: true });
+    throw new Error(
+      `Could not download or verify the WebView2 Bootstrapper: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+async function installWebView2Runtime() {
+  const downloaded = await downloadWebView2Bootstrapper();
+  try {
+    console.log("[Portable] Running the WebView2 Bootstrapper; Microsoft Runtime installation may request UAC.");
+    const exitCode = await runWebView2Installer(downloaded.installer);
+    if (exitCode !== 0) throw new Error(`installer exited with code ${exitCode}`);
+    if (!(await waitForWebView2Runtime())) throw new Error("Runtime was not detected after installation");
+  } finally {
+    rmSync(downloaded.tempRoot, { recursive: true, force: true });
+  }
 }
 
 async function waitForWebView2Runtime() {
@@ -306,24 +362,21 @@ async function start() {
       );
     }
     if (!hasWebView2Runtime()) {
-      const installer = resolveWebView2Bootstrapper();
-      const installerAvailable = existsSync(installer);
-      const question = installerAvailable
-        ? "WebView2 Runtime is not installed. Run the packaged online installer now? (15 seconds)"
-        : "WebView2 Runtime is not installed. Open the official installation page now? (15 seconds)";
-      if (await askYesNoWithTimeout(question)) {
-        if (installerAvailable) {
-          console.log(`[Portable] Running WebView2 Bootstrapper: ${installer}`);
-          const exitCode = await runWebView2Installer(installer);
-          if (exitCode !== 0 || !(await waitForWebView2Runtime())) {
-            throw new Error("WebView2 Runtime installation did not complete. Use --mode=browser or install it manually.");
-          }
-        } else {
-          openExternal(WEBVIEW2_INSTALL_HELP_URL);
-          throw new Error("WebView2 Runtime is required for --mode=webview2; installation guidance was opened.");
-        }
-      } else {
+      const approvedByNativeLauncher = process.env[WEBVIEW2_INSTALL_APPROVED_ENV] === "1";
+      const approved = approvedByNativeLauncher || await askYesNoWithTimeout(
+        "WebView2 Runtime is not installed. Download and install it from Microsoft now? Internet access is required. (15 seconds)",
+      );
+      if (!approved) {
         throw new Error("WebView2 Runtime is required for --mode=webview2; use --mode=browser instead.");
+      }
+      try {
+        await installWebView2Runtime();
+      } catch (error) {
+        openExternal(WEBVIEW2_INSTALL_HELP_URL);
+        throw new Error(
+          `WebView2 Runtime installation did not complete: ${error instanceof Error ? error.message : String(error)}. ` +
+          "Use --mode=browser or install it manually.",
+        );
       }
     }
   }

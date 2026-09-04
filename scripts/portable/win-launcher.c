@@ -11,6 +11,7 @@
 
 #define NODE_DOWNLOAD_URL L"https://nodejs.org/en/download/"
 #define RELEASES_URL L"https://github.com/icebear0828/codex-proxy/releases/latest"
+#define WEBVIEW2_INSTALL_APPROVED_ENV L"CODEX_PROXY_ALLOW_WEBVIEW2_INSTALL"
 #define NODE_PROMPT_TIMEOUT_MS 15000
 #define TRAY_CALLBACK_MESSAGE (WM_APP + 1)
 #define TRAY_OPEN_DASHBOARD 1001
@@ -502,59 +503,24 @@ static DWORD wait_for_child(void) {
     return exit_code;
 }
 
-static void offer_webview2_install(const wchar_t *root) {
-    const wchar_t *installer = L"tools\\MicrosoftEdgeWebView2Setup.exe";
-    wchar_t installer_path[MAX_PATH * 4];
-    _snwprintf_s(installer_path, sizeof(installer_path) / sizeof(installer_path[0]), _TRUNCATE,
-                 L"%s\\%s", root, installer);
+static int offer_webview2_install(void) {
+    const int answer = show_timeout_message(
+        L"WebView2 Runtime is required for the requested mode but is not installed.\n\n"
+        L"Codex Proxy will download the small Microsoft installer and run it.\n"
+        L"Internet access is required, and Windows may ask for permission. Continue? (15 seconds)",
+        L"Codex Proxy - WebView2 required", MB_YESNO | MB_ICONWARNING);
+    if (answer != IDYES) return 0;
 
-    wchar_t question[2048];
-    if (GetFileAttributesW(installer_path) != INVALID_FILE_ATTRIBUTES) {
-        _snwprintf_s(
-            question, sizeof(question) / sizeof(question[0]), _TRUNCATE,
-            L"WebView2 Runtime is required for the requested mode but is not installed.\n\n"
-            L"Run the packaged online installer now? (15 seconds)");
-        if (show_timeout_message(question, L"Codex Proxy - WebView2 required", MB_YESNO | MB_ICONWARNING) != IDYES) return;
-
-        wchar_t command[8192];
-        size_t command_length = 0;
-        append_arg(command, sizeof(command) / sizeof(command[0]), &command_length, installer_path);
-        append_text(command, sizeof(command) / sizeof(command[0]), &command_length, L" /silent /install");
-        STARTUPINFOW startup = {0};
-        PROCESS_INFORMATION process = {0};
-        startup.cb = sizeof(startup);
-        if (CreateProcessW(NULL, command, NULL, NULL, FALSE, CREATE_NO_WINDOW,
-                           NULL, root, &startup, &process)) {
-            WaitForSingleObject(process.hProcess, INFINITE);
-            CloseHandle(process.hThread);
-            CloseHandle(process.hProcess);
-            show_timeout_message(
-                L"The WebView2 installer has finished. Start codex-proxy.exe again to use WebView2.",
-                L"Codex Proxy", MB_OK | MB_ICONINFORMATION);
-        } else {
-            show_timeout_message(
-                L"The WebView2 installer could not be started. Use the official WebView2 installation page instead.",
-                L"Codex Proxy - WebView2 required", MB_OK | MB_ICONWARNING);
-            ShellExecuteW(NULL, L"open", L"https://developer.microsoft.com/microsoft-edge/webview2/",
-                          NULL, NULL, SW_SHOWNORMAL);
-        }
-        return;
-    }
-
-    if (show_timeout_message(
-            L"WebView2 Runtime is required for the requested mode but is not installed.\n\n"
-            L"Open the official WebView2 installation page now? (15 seconds)",
-            L"Codex Proxy - WebView2 required", MB_YESNO | MB_ICONWARNING) == IDYES) {
-        ShellExecuteW(NULL, L"open", L"https://developer.microsoft.com/microsoft-edge/webview2/",
-                      NULL, NULL, SW_SHOWNORMAL);
-    }
+    /* The Node wrapper owns the single online-download implementation. On the
+       retry it downloads to a temporary directory, verifies the Authenticode
+       signature, runs the installer, and checks the Runtime again. */
+    return SetEnvironmentVariableW(WEBVIEW2_INSTALL_APPROVED_ENV, L"1") ? 1 : 0;
 }
 
-static void show_child_failure(const wchar_t *root, DWORD exit_code) {
-    if (quit_requested || exit_code == 0) return;
+static int show_child_failure(DWORD exit_code) {
+    if (quit_requested || exit_code == 0) return 0;
     if (strstr(captured_output, "WebView2 Runtime is required") != NULL) {
-        offer_webview2_install(root);
-        return;
+        return offer_webview2_install();
     }
     wchar_t detail[4096];
     int converted = 0;
@@ -570,6 +536,7 @@ static void show_child_failure(const wchar_t *root, DWORD exit_code) {
         detail[converted] = L'\0';
     }
     show_timeout_message(detail, L"Codex Proxy - Startup Error", MB_OK | MB_ICONERROR);
+    return 0;
 }
 
 int wmain(int argc, wchar_t **argv) {
@@ -680,7 +647,38 @@ int wmain(int argc, wchar_t **argv) {
     }
 
     DWORD exit_code = wait_for_child();
-    show_child_failure(root, exit_code);
+    if (show_child_failure(exit_code)) {
+        /* The first child only reported the missing Runtime because the GUI
+           launcher has no interactive stdin. The confirmation above approved
+           one retry; the Node wrapper performs the download and installation
+           on this second start. */
+        if (output_read) {
+            CloseHandle(output_read);
+            output_read = NULL;
+        }
+        if (child_job) {
+            CloseHandle(child_job);
+            child_job = NULL;
+        }
+        if (child_process) {
+            CloseHandle(child_process);
+            child_process = NULL;
+        }
+        dashboard_url[0] = L'\0';
+        webview2_host_path[0] = L'\0';
+        webview2_initial_start_attempted = 0;
+        captured_output_length = 0;
+        captured_output[0] = '\0';
+        if (start_child(root, command)) {
+            exit_code = wait_for_child();
+            show_child_failure(exit_code);
+        } else {
+            exit_code = 1;
+            show_timeout_message(
+                L"The portable server could not be restarted to install WebView2.",
+                L"Codex Proxy - WebView2 required", MB_OK | MB_ICONERROR);
+        }
+    }
     if (webview2_process) {
         if (WaitForSingleObject(webview2_process, 0) != WAIT_OBJECT_0) {
             TerminateProcess(webview2_process, 0);
