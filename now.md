@@ -50,6 +50,9 @@ tag or a manual dispatch before this follow-up is proposed upstream.
 An additional `native-musl-ci.yml` workflow is intentionally limited to the
 Linux x64 musl addon build, ELF dependency inspection, and direct native HTTP
 smoke test; it does not build the Lite archive or WebView2 hosts.
+The branch-push validation for this focused workflow passed on GitHub run
+`33941043983` at commit `522efda`. All build, Alpine native-load, ELF inspection,
+and artifact-upload steps succeeded.
 
 ## Validation evidence
 
@@ -63,9 +66,9 @@ smoke test; it does not build the Lite archive or WebView2 hosts.
 - Windows package test passed with the native launcher, both WebView2 hosts,
   no-Node checks, data-path checks, and server smoke checks.
 - Portable contract and CI package-boundary tests passed: 23 tests.
-- The Linux x64 musl build and Alpine runtime smoke test are delegated to
-  GitHub CI; this Windows host has neither Docker nor an Alpine runtime, so
-  those two boundaries are currently UNRUN locally.
+- The Linux x64 musl build and Alpine runtime smoke test remain UNRUN locally
+  because this Windows host has neither Docker nor an Alpine runtime; GitHub
+  CI run `33941043983` passed both boundaries and uploaded the tested addon.
 - Full project test suite was not rerun in this follow-up; the portable-focused
   tests and build checks are the current evidence.
 
