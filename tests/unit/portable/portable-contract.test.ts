@@ -213,6 +213,8 @@ describe("No-Node Lite distribution contract", () => {
     const workflow = readFileSync(NATIVE_MUSL_WORKFLOW, "utf8");
     expect(workflow).toContain("name: Linux x64 musl native CI");
     expect(workflow).toContain("workflow_dispatch:");
+    expect(workflow).toContain("push:");
+    expect(workflow).toContain("- feat/lite-zip-on-demand");
     expect(workflow).toContain("nodejs-rust:lts-alpine");
     expect(workflow).toContain("npm run build:linux-x64-musl");
     expect(workflow).toContain("scripts/native/test-linux-x64-musl.mjs");
