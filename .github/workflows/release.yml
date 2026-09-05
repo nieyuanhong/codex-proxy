@@ -299,7 +299,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/native:/build" \
             -w /build \
             ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine \
-            sh -lc 'set -eu; rustup toolchain install 1.85.0 --profile minimal --no-self-update; rustup target add x86_64-unknown-linux-musl --toolchain 1.85.0; export RUSTUP_TOOLCHAIN=1.85.0; npm ci --ignore-scripts --no-audit --no-fund; npm run build:linux-x64-musl'
+            sh -lc 'set -eu; rustup toolchain install 1.88.0 --profile minimal --no-self-update; rustup target add x86_64-unknown-linux-musl --toolchain 1.88.0; export RUSTUP_TOOLCHAIN=1.88.0; npm ci --ignore-scripts --no-audit --no-fund; npm run build:linux-x64-musl'
 
       - name: Inspect Linux x64 musl native addon
         shell: bash
