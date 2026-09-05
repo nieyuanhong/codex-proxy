@@ -216,7 +216,7 @@ describe("No-Node Lite distribution contract", () => {
     expect(workflow).toContain("push:");
     expect(workflow).toContain("- feat/lite-zip-on-demand");
     expect(workflow).toContain("nodejs-rust:lts-alpine");
-    expect(workflow).toContain("apk add --no-cache linux-headers musl-dev");
+    expect(workflow).toContain("apk add --no-cache build-base linux-headers");
     expect(workflow).toContain("rustup toolchain install 1.88.0");
     expect(workflow).toContain("RUSTUP_TOOLCHAIN=1.88.0");
     expect(workflow).toContain("npm run build:linux-x64-musl");
