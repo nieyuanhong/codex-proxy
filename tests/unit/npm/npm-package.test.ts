@@ -18,6 +18,17 @@ type AddonPackage = {
   libc: "glibc" | "musl" | null;
   file: string;
 };
+type MainManifest = {
+  version: string;
+  optionalDependencies: Record<string, string>;
+};
+type AddonManifest = {
+  os: string[];
+  cpu: string[];
+  libc?: string[];
+  files: string[];
+  main: string;
+};
 type StageModule = {
   ADDON_PACKAGES: AddonPackage[];
   MAIN_PACKAGE_NAME: string;
@@ -82,9 +93,9 @@ describe("npm distribution staging", () => {
 
   it("wires every addon package into the main manifest as an exact optional dependency", () => {
     const version = "9.9.9";
-    const manifest = buildMainManifest(TEMPLATE, version) as Record<string, any>;
+    const manifest = buildMainManifest(TEMPLATE, version) as MainManifest;
     expect(manifest.version).toBe(version);
-    const optional = manifest.optionalDependencies as Record<string, string>;
+    const optional = manifest.optionalDependencies;
     expect(Object.keys(optional).sort()).toEqual(ADDON_PACKAGES.map((addon) => addon.name).sort());
     for (const addon of ADDON_PACKAGES) {
       expect(optional[addon.name]).toBe(version);
@@ -102,7 +113,7 @@ describe("npm distribution staging", () => {
 
   it("restricts addon packages to their own platform files", () => {
     for (const addon of ADDON_PACKAGES) {
-      const manifest = buildAddonManifest(addon, "1.0.0") as Record<string, any>;
+      const manifest = buildAddonManifest(addon, "1.0.0") as AddonManifest;
       expect(manifest.os).toEqual([addon.os]);
       expect(manifest.cpu).toEqual([addon.cpu]);
       if (addon.libc) expect(manifest.libc).toEqual([addon.libc]);
@@ -111,5 +122,22 @@ describe("npm distribution staging", () => {
       // Without a main entry, require('codex-tls-<triple>') cannot resolve.
       expect(manifest.main).toBe(addon.file);
     }
+  });
+
+  it("classifies the npm install as npm, not lite, at runtime", () => {
+    // The same portable wrapper serves the Lite zip and the npm packages; it
+    // must derive the distribution from the staged manifest so /admin
+    // update hints and self-update gating treat an npm install as npm.
+    const wrapper = readFileSync(resolve(ROOT, "scripts", "portable", "server.mjs"), "utf8");
+    expect(wrapper).toContain('readFileSync(join(APP_DIR, "manifest.json")');
+    expect(wrapper).toContain('manifest?.distribution === "npm"');
+    // Unreadable or absent manifest keeps the historical Lite classification.
+    expect(wrapper).toMatch(/let distribution = "lite"/);
+    // The npm staging manifest is what flips the wrapper to npm mode...
+    const stageSource = readFileSync(STAGE_SCRIPT, "utf8");
+    expect(stageSource).toMatch(/distribution: "npm"/);
+    // ...while the Lite manifest deliberately has no distribution field.
+    const liteBuilder = readFileSync(resolve(ROOT, "scripts", "portable", "build-portable.mjs"), "utf8");
+    expect(liteBuilder).not.toMatch(/distribution:/);
   });
 });

@@ -16,6 +16,7 @@ on:
       - "native/**"
       - "packages/npm/**"
       - "scripts/npm/**"
+      - "scripts/portable/**"
       - ".github/workflows/npm-publish.yml"
 
 permissions:
