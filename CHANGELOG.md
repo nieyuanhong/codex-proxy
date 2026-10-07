@@ -8,9 +8,39 @@
 
 ## [Unreleased]
 
-> 暂无已记录的变更。
+### Fixed
+
+- 修复 Docker 部署下已有配置卷永远拿不到镜像新增默认文件的问题（#837）:标准版与 Lite 版 entrypoint 此前只在配置目录**完全为空**时从镜像 `/defaults` 复制一次，配置卷一旦被播种过，后续镜像升级新增的配置文件（如 `model-pricing.yaml`）就再也不会进入运行时配置目录——表现为 token 统计正常但估算成本恒为 0，旧版 `models.yaml` 等默认值同样不会更新。现在每次启动都按文件补种:递归 `cp -rn`（no-clobber）只补齐缺失文件，用户改过的文件与旧默认值一概不覆盖，嵌套新增文件（如 `prompts/` 目录内新增的提示词）同样补齐，并输出本次补种文件数;补种失败（目录不可创建或不可写）只告警、不阻断启动。路径可用 `CODEX_ENTRYPOINT_DEFAULTS_DIR` / `CODEX_ENTRYPOINT_CONFIG_DIR` 覆盖。（`docker-entrypoint.sh`、`scripts/docker/lite-entrypoint.sh`、`tests/unit/ci/docker-entrypoint-seed.test.ts`）
+
+- 修复价格表加载失败完全静默、且失败产生的空价格表被进程永久缓存的问题（#837）:`src/logs/metrics.ts` 的 `getCatalog()` 捕获异常后静默把价格表设为 `{}` 并永久缓存，`annotateUsageCost()` 也特意吞掉 ENOENT 警告，用户容易把「价格表没加载」误认为「成本真的是 0」。现在加载失败会带实际文件路径与原因告警（按路径+原因去重、5 分钟冷却，避免每请求刷屏），空表只缓存 60 秒后重试，把缺失文件补进配置卷后无需重启即可恢复计价并输出恢复日志。（`src/auth/usage-pricing.ts`、`src/logs/metrics.ts`、`src/routes/shared/proxy-handler-utils.ts`、`tests/unit/logs/metrics.test.ts`）
+
+> 暂无其他已记录的变更。
 
 ## [v2.1.x](https://github.com/icebear0828/codex-proxy/releases?q=2.1) - 2026-09-01 至 2026-09-07
+
+### Changed
+
+- 仓库不再跟踪预编译的 native addon（`native/codex-tls.*.node`）与 CI 运行日志转储（`run-logs*.txt`）。这些是构建产物而非源码：各平台流水线都会重新编译 addon，源码运行也一直要求先执行 `cd native && npm install && npm run build`（README 已有说明），继续跟踪只会让过期的二进制被反复打包进发布产物。同时补齐 `.gitignore`（`logs/`、`coverage/`、`*.tgz`、`.env.*`、系统与编辑器临时文件等），避免同类文件再次误入库。
+
+- 仓库不再跟踪预编译的 native addon（`native/codex-tls.*.node`）与 CI 运行日志转储（`run-logs*.txt`）。这些是构建产物而非源码：各平台流水线都会重新编译 addon，源码运行也一直要求先执行 `cd native && npm install && npm run build`（README 已有说明），继续跟踪只会让过期的二进制被反复打包进发布产物。同时补齐 `.gitignore`（`logs/`、`coverage/`、`*.tgz`、`.env.*`、系统与编辑器临时文件等），避免同类文件再次误入库。
+
+- Antigravity OAuth 账号改由首页账号区管理；API Keys 页面不再提供 Antigravity 手动录入入口，已有 Antigravity 条目也不再显示在该列表中。（`src/routes/api-keys.ts`、`web/src/components/ApiKeyManager.tsx`）
+
+- Antigravity OAuth 使用内置 client secret，常规使用无需设置 `ANTIGRAVITY_OAUTH_CLIENT_SECRET`；该变量仍可用于覆盖默认凭据。（`src/proxy/antigravity-upstream.ts`、`.env.example`、`README.md`）
+
+- API Keys 第三方供应商模型列表缓存 TTL 从 7 天缩短至 1 小时；`POST /auth/api-keys/models` 新增 `force` 参数强制绕过缓存，响应新增 `fetchedAt` / `fromCache` / `stale` 字段；非强制刷新遇上游故障时降级返回过期缓存（`stale` 标记）而不是直接退回手动输入。（`src/auth/api-key-model-cache.ts`、`src/routes/api-keys.ts`）
+
+- API Keys 添加面板模型清单新增手动「刷新」按钮与模型筛选框，显示模型数量与更新时间；刷新失败时保留当前列表。（`web/src/components/ApiKeyManager.tsx`、`shared/hooks/use-api-keys.ts`）
+
+- API Keys 添加表单「供应商」标签更名为「供应商类型」；添加接口跳过已存在的（模型, key）组合并返回 `duplicates` 计数，同模型不同 key 仍允许添加以支持轮询。（`src/routes/api-keys.ts`、`shared/i18n/translations.ts`）
+
+- No-Node Lite 制品格式从 tar.xz 改为 zip：Python zipfile deflate -9 极限压缩、条目确定性排序，`codex-proxy.sh` 以 0755 权限位写入；产物更名为 `codex-proxy-<版本>-no-node-lite-all-platforms.zip`，打包现依赖 Python 3。（`scripts/portable/build-portable.mjs`、`scripts/portable/test-portable.mjs`、`.github/workflows/lite-ci.yml`、`.github/workflows/release.yml`、`README.md` 及各语言版本）
+
+- 统一各页面工具栏按钮风格：管理账号（`AccountBulkActions`）、API Keys（`ApiKeyManager`）、代理池（`ProxyPool`）、错误页面（`ErrorsPage`）的顶部与行内按钮全部改用 `accountToolbarControlClass` / `accountToolbarIconClass`，与首页账号列表工具栏保持一致；代理池及错误页面的文字操作按钮改为纯图标按钮（tooltip 保留文字），批量操作栏按钮样式一致化。（`web/src/components/AccountBulkActions.tsx`、`web/src/components/ApiKeyManager.tsx`、`web/src/components/ProxyPool.tsx`、`web/src/pages/AccountManagement.tsx`、`web/src/pages/ErrorsPage.tsx`）
+
+- 官方模型识别改为按名称形态前缀放行（`gpt*` / `codex*` / `oN*`），不再要求模型已收录于本地 catalog：当后端/账号尚未下发的新官方模型（如 `gpt-6-astra`）被客户端请求时，不再返回 `404 model_not_found` 或静默回退默认模型，而是按原名透传交由上游裁决；`resolveModelId` 对官方形态模型原样解析、不回退默认。边界保持不变：非官方形态的未知模型仍 `404`，裸 `codex` 哨兵仍解析为默认模型（`src/models/model-store.ts`）。
+
+- 点击「添加账户」不再立即弹出授权网页，改为弹出对话框展示授权 URL，提供「复制」与「打开链接」按钮，由用户自行选择打开时机；下方保留 RT（Refresh Token）输入与导入入口。（`web/src/components/AddAccount.tsx`、`shared/hooks/use-accounts.ts`）
 
 ### Fixed
 
@@ -53,26 +83,6 @@
 - 修复并统一桌面端与 Web 端应用图标与 Logo：生成包含 Windows 完整多分辨率的 `icon.ico`、Web `favicon.ico` / `icon.png`，Electron 主进程窗口配置中注入应用图标并移除 `electron-builder` 的 `signAndEditExecutable: false` 以确保可执行文件与任务栏/桌面快捷方式正确嵌入图标；统一 Dashboard 顶部导航栏 Logo 为品牌立方体图标。（`packages/electron/`、`web/`、`scripts/build/generate-ico.ps1`）
 
 - 移除 Dashboard 顶部导航栏与侧栏重复展示的「服务运行中」状态徽标（`web/src/components/Header.tsx`）。
-
-### Changed
-
-- Antigravity OAuth 账号改由首页账号区管理；API Keys 页面不再提供 Antigravity 手动录入入口，已有 Antigravity 条目也不再显示在该列表中。（`src/routes/api-keys.ts`、`web/src/components/ApiKeyManager.tsx`）
-
-- Antigravity OAuth 使用内置 client secret，常规使用无需设置 `ANTIGRAVITY_OAUTH_CLIENT_SECRET`；该变量仍可用于覆盖默认凭据。（`src/proxy/antigravity-upstream.ts`、`.env.example`、`README.md`）
-
-- API Keys 第三方供应商模型列表缓存 TTL 从 7 天缩短至 1 小时；`POST /auth/api-keys/models` 新增 `force` 参数强制绕过缓存，响应新增 `fetchedAt` / `fromCache` / `stale` 字段；非强制刷新遇上游故障时降级返回过期缓存（`stale` 标记）而不是直接退回手动输入。（`src/auth/api-key-model-cache.ts`、`src/routes/api-keys.ts`）
-
-- API Keys 添加面板模型清单新增手动「刷新」按钮与模型筛选框，显示模型数量与更新时间；刷新失败时保留当前列表。（`web/src/components/ApiKeyManager.tsx`、`shared/hooks/use-api-keys.ts`）
-
-- API Keys 添加表单「供应商」标签更名为「供应商类型」；添加接口跳过已存在的（模型, key）组合并返回 `duplicates` 计数，同模型不同 key 仍允许添加以支持轮询。（`src/routes/api-keys.ts`、`shared/i18n/translations.ts`）
-
-- No-Node Lite 制品格式从 tar.xz 改为 zip：Python zipfile deflate -9 极限压缩、条目确定性排序，`codex-proxy.sh` 以 0755 权限位写入；产物更名为 `codex-proxy-<版本>-no-node-lite-all-platforms.zip`，打包现依赖 Python 3。（`scripts/portable/build-portable.mjs`、`scripts/portable/test-portable.mjs`、`.github/workflows/lite-ci.yml`、`.github/workflows/release.yml`、`README.md` 及各语言版本）
-
-- 统一各页面工具栏按钮风格：管理账号（`AccountBulkActions`）、API Keys（`ApiKeyManager`）、代理池（`ProxyPool`）、错误页面（`ErrorsPage`）的顶部与行内按钮全部改用 `accountToolbarControlClass` / `accountToolbarIconClass`，与首页账号列表工具栏保持一致；代理池及错误页面的文字操作按钮改为纯图标按钮（tooltip 保留文字），批量操作栏按钮样式一致化。（`web/src/components/AccountBulkActions.tsx`、`web/src/components/ApiKeyManager.tsx`、`web/src/components/ProxyPool.tsx`、`web/src/pages/AccountManagement.tsx`、`web/src/pages/ErrorsPage.tsx`）
-
-- 官方模型识别改为按名称形态前缀放行（`gpt*` / `codex*` / `oN*`），不再要求模型已收录于本地 catalog：当后端/账号尚未下发的新官方模型（如 `gpt-6-astra`）被客户端请求时，不再返回 `404 model_not_found` 或静默回退默认模型，而是按原名透传交由上游裁决；`resolveModelId` 对官方形态模型原样解析、不回退默认。边界保持不变：非官方形态的未知模型仍 `404`，裸 `codex` 哨兵仍解析为默认模型（`src/models/model-store.ts`）。
-
-- 点击「添加账户」不再立即弹出授权网页，改为弹出对话框展示授权 URL，提供「复制」与「打开链接」按钮，由用户自行选择打开时机；下方保留 RT（Refresh Token）输入与导入入口。（`web/src/components/AddAccount.tsx`、`shared/hooks/use-accounts.ts`）
 
 ### Added
 
