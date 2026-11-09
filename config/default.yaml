@@ -11,7 +11,7 @@ client:
   chromium_version: "146"
 
 model:
-  default: gpt-5.6-sol
+  default: gpt-6.1-sol
   # Codex host model for POST /v1/images/generations. The client-facing
   # gpt-image-2 identifier only means "generate an image" — it is never
   # sent upstream as the chat model itself.
@@ -33,6 +33,11 @@ model:
   # The two `_inline` modes can bypass Codex backend's built-in base prompt prior
   # in cases where the `instructions` field is overridden by server-injected context.
   system_prompt_strategy: instructions
+  # Sync the official Codex model catalog from the openai/codex repository
+  # (no credentials). Failures are silent and fall back to backend fetching.
+  official_catalog_sync: true
+  # Re-fetch the cached official catalog at most this often (hours, min 1).
+  official_catalog_refresh_hours: 6
 auth:
   jwt_token: null
   chatgpt_oauth: true
@@ -83,6 +88,31 @@ quota:
       - 80
       - 90
   skip_exhausted: true
+# Refuse to resend a conversation the upstream safety gate already rejected.
+# Such a rejection is a function of the content, so a retry cannot succeed: it
+# only reports another violation, which is what escalates to an account ban.
+# Disabled by default. See src/proxy/policy-rejection.ts.
+policy_guard:
+  enabled: false
+  # Structured error.code values identifying a policy rejection.
+  error_codes:
+    - cyber_policy
+    - session_blocked_by_cyber_policy
+  # Substring fallbacks for deployments that strip the code. Matched against
+  # upstream error output only — never against request content.
+  message_patterns:
+    - possible cybersecurity risk
+    - high-risk cyber activity
+    - cyber-security policy
+    - 网络安全策略屏蔽
+  # Optional narrowing filter. When non-empty, only these HTTP statuses can be
+  # treated as a policy rejection; empty means no restriction. A status never
+  # triggers the guard on its own (403 also means ban, 429 also means rate
+  # limit), so this can only make the guard stricter. Ignored for stream
+  # terminal frames, which carry no HTTP status.
+  status_codes: []
+  # Quarantine lifetime in seconds; edited history releases it sooner.
+  ttl_seconds: 3600
 update:
   auto_update: true
   show_update_dialog: false

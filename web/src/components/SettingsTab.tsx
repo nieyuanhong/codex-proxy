@@ -2,6 +2,7 @@ import { GeneralSettings } from "./GeneralSettings";
 import { LogsSettings } from "./LogsSettings";
 import { ModelAliasSettings } from "./ModelAliasSettings";
 import { OllamaBridgeSettings } from "./OllamaBridgeSettings";
+import { PolicyGuardSettings } from "./PolicyGuardSettings";
 import { QuotaSettings } from "./QuotaSettings";
 import { RotationSettings } from "./RotationSettings";
 import { SettingsPanel } from "./SettingsPanel";
@@ -11,15 +12,17 @@ interface SettingsTabProps {
   models: string[];
   layoutMode: LayoutMode;
   onLayoutModeChange: (mode: LayoutMode) => void;
+  isDesktop?: boolean;
 }
 
 export function SettingsTab(props: SettingsTabProps) {
   return (
     <div class="flex flex-col gap-6">
       <SettingsPanel />
-      <GeneralSettings layoutMode={props.layoutMode} onLayoutModeChange={props.onLayoutModeChange} />
+      <GeneralSettings layoutMode={props.layoutMode} onLayoutModeChange={props.onLayoutModeChange} isDesktop={props.isDesktop} />
       <ModelAliasSettings models={props.models} />
       <QuotaSettings />
+      <PolicyGuardSettings />
       <RotationSettings />
       <LogsSettings />
       <OllamaBridgeSettings />

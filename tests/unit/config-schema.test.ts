@@ -3,11 +3,20 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import yaml from "js-yaml";
 import {
   ConfigSchema,
   FingerprintSchema,
   ROTATION_STRATEGIES,
 } from "@src/config-schema.js";
+import {
+  DEFAULT_POLICY_ERROR_CODES,
+  DEFAULT_POLICY_MESSAGE_PATTERNS,
+  DEFAULT_POLICY_STATUS_CODES,
+} from "@src/proxy/policy-rejection.js";
+import { DEFAULT_QUARANTINE_TTL_SECONDS } from "@src/proxy/conversation-quarantine.js";
 
 describe("ROTATION_STRATEGIES", () => {
   it("contains expected values", () => {
@@ -37,7 +46,9 @@ describe("ConfigSchema", () => {
     expect(result.auth.refresh_concurrency).toBe(2);
     expect(result.auth.max_concurrent_per_account).toBe(3);
     expect(result.auth.request_interval_ms).toBe(50);
-    expect(result.model.default).toBe("gpt-5.6-sol");
+    expect(result.model.default).toBe("gpt-6.1-sol");
+    expect(result.model.official_catalog_sync).toBe(true);
+    expect(result.model.official_catalog_refresh_hours).toBe(6);
     expect(result.model.default_reasoning_effort).toBeNull();
     expect(result.model.aliases).toEqual({});
     expect(result.model.custom_models).toEqual([]);
@@ -176,6 +187,18 @@ describe("ConfigSchema", () => {
     expect(result.official_agent.auth).toEqual({ type: "capability_token", token_file: "/tmp/codex-token" });
   });
 
+  it("normalizes official_catalog_refresh_hours", () => {
+    const parse = (hours: unknown) => ConfigSchema.parse({
+      api: {}, client: {}, model: { official_catalog_refresh_hours: hours }, auth: {}, server: {}, session: {},
+    }).model.official_catalog_refresh_hours;
+
+    expect(parse(12)).toBe(12);
+    expect(parse(0.4)).toBe(1);
+    expect(parse(0)).toBe(6);
+    expect(parse(-3)).toBe(6);
+    expect(parse(4.6)).toBe(5);
+  });
+
   it("rejects non-websocket official agent URLs", () => {
     const result = ConfigSchema.safeParse({
       api: {}, client: {}, model: {}, auth: {}, server: {}, session: {},
@@ -269,6 +292,38 @@ describe("ConfigSchema", () => {
     expect(result.quota.concurrency).toBe(10);
     expect(result.update.auto_update).toBe(true);
     expect(result.update.show_update_dialog).toBe(false);
+  });
+});
+
+describe("policy_guard defaults", () => {
+  const minimalConfig = {
+    api: {}, client: {}, model: {}, auth: {}, server: {}, session: {},
+  };
+
+  it("matches the matcher and quarantine module constants", () => {
+    // The guard's built-in detection lists and its quarantine TTL exist both
+    // as schema defaults and as module constants; enabling the guard without
+    // writing the config block must behave exactly like the constants do.
+    const result = ConfigSchema.parse(minimalConfig);
+    expect(result.policy_guard).toEqual({
+      enabled: false,
+      error_codes: [...DEFAULT_POLICY_ERROR_CODES],
+      message_patterns: [...DEFAULT_POLICY_MESSAGE_PATTERNS],
+      status_codes: [...DEFAULT_POLICY_STATUS_CODES],
+      ttl_seconds: DEFAULT_QUARANTINE_TTL_SECONDS,
+    });
+  });
+
+  it("keeps config/default.yaml in step with the schema defaults", () => {
+    // The shipped file, the schema defaults and the module constants are
+    // three copies of the same contract; drift between them is invisible
+    // until a deployment relies on one of the copies.
+    const file = readFileSync(
+      resolve(import.meta.dirname, "../../config/default.yaml"),
+      "utf8",
+    );
+    const parsed = ConfigSchema.parse(yaml.load(file));
+    expect(parsed.policy_guard).toEqual(ConfigSchema.parse(minimalConfig).policy_guard);
   });
 });
 

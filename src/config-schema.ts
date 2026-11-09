@@ -81,7 +81,15 @@ export const ConfigSchema = z.object({
   }),
 
   model: z.object({
-    default: z.string().default("gpt-5.6-sol"),
+    default: z.string().default("gpt-6.1-sol"),
+    /** Sync the official Codex model manifest from the openai/codex repository.
+     *  Credential-free; failures silently fall back to the backend fetch. */
+    official_catalog_sync: z.boolean().default(true),
+    /** How often the cached official manifest is re-fetched. Values <= 0 fall
+     *  back to the default (6h); the minimum effective value is 1h. */
+    official_catalog_refresh_hours: z.number()
+      .default(6)
+      .transform((hours) => (Number.isFinite(hours) && hours > 0 ? Math.max(1, Math.round(hours)) : 6)),
     /** Codex chat model that hosts `POST /v1/images/generations` requests via the
      *  Responses `image_generation` tool. Cannot be `gpt-image-2` — that name is
      *  only the Images API's client-facing identifier, not a routable Codex model. */
@@ -223,6 +231,17 @@ export const ConfigSchema = z.object({
     show_update_dialog: z.boolean().default(false),
     allow_prerelease: z.boolean().default(false),
   }).default({}),
+  pricing: z.object({
+    /** URLs to dynamically fetch updated model pricing tables from. */
+    table_urls: z.array(z.string().url()).default([
+      "https://cdn.jsdelivr.net/gh/BerriAI/litellm@main/model_prices_and_context_window.json",
+      "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+    ]),
+    /** Enable automatic background sync of pricing catalog. */
+    auto_sync: z.boolean().default(true),
+    /** Sync interval in hours. */
+    sync_interval_hours: z.number().positive().default(24),
+  }).default({}),
   /** WebSocket connection pool — pins same (entryId, conversationId) to the
    *  same physical WS so the upstream LB keeps prompt cache warm across
    *  turns. See `src/proxy/ws-pool.ts` for the rationale. */
@@ -279,6 +298,42 @@ export const ConfigSchema = z.object({
   }).default({}),
   /** Explicit model → provider name routing table. */
   model_routing: z.record(z.string(), z.string()).default({}),
+  /**
+   * Refuse to resend a conversation the upstream safety gate already rejected.
+   *
+   * A policy rejection is a function of the content, so retrying it — on the
+   * same account, another account, or after stripping `previous_response_id`
+   * — reproduces the rejection and adds another violation report, which is what
+   * escalates to an account ban. Disabled by default: it changes request
+   * behavior, and the built-in patterns are worth reviewing first.
+   * See `src/proxy/policy-rejection.ts` and `src/proxy/conversation-quarantine.ts`.
+   */
+  policy_guard: z.object({
+    enabled: z.boolean().default(false),
+    /** Structured `error.code` values that identify a policy rejection. */
+    error_codes: z.array(z.string().trim().min(1)).default([
+      "cyber_policy",
+      "session_blocked_by_cyber_policy",
+    ]),
+    /** Substring fallbacks for deployments that strip or rewrite the code.
+     *  Matched against upstream error output only — never request content. */
+    message_patterns: z.array(z.string().trim().min(1)).default([
+      "possible cybersecurity risk",
+      "high-risk cyber activity",
+      "cyber-security policy",
+      "网络安全策略屏蔽",
+    ]),
+    /** Optional narrowing filter: when non-empty, only these HTTP statuses are
+     *  eligible to be treated as a policy rejection. Empty (default) means no
+     *  restriction. A status never triggers the guard on its own — 403 also
+     *  means account ban and 429 also means rate limit — so this can only make
+     *  the guard stricter, not looser. Ignored for stream terminal frames,
+     *  which carry no HTTP status. */
+    status_codes: z.array(z.number().int().min(100).max(599)).default([]),
+    /** How long a quarantined conversation stays blocked, in seconds. The
+     *  content-prefix check releases it earlier when the history is edited. */
+    ttl_seconds: z.number().int().min(1).default(3600),
+  }).default({}),
   /** Scheduled keepalive pings to keep accounts' quota windows fresh. */
   account_keepalive: z.object({
     enabled: z.boolean().default(false),

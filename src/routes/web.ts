@@ -1,3 +1,4 @@
+import type { LanRuntimeState } from "../utils/lan-access.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
@@ -13,6 +14,7 @@ import { createOllamaAdminRoutes } from "./admin/ollama.js";
 import { createUsageStatsRoutes } from "./admin/usage-stats.js";
 import { createLogRoutes } from "./admin/logs.js";
 import { createErrorLogRoutes } from "./admin/error-logs.js";
+import { createPolicyGuardRoutes } from "./admin/policy-guard.js";
 import { createClientKeyAdminRoutes } from "./admin/client-keys.js";
 import { createKeepaliveRoutes } from "./admin/keepalive.js";
 import { getConfig } from "../config.js";
@@ -25,6 +27,7 @@ export function createWebRoutes(
   usageStats: UsageStatsStore,
   clientKeyPool?: ClientKeyPool,
   keepaliveScheduler?: KeepaliveScheduler,
+  getLanRuntime?: () => LanRuntimeState | null,
 ): Hono {
   const app = new Hono();
 
@@ -91,11 +94,12 @@ export function createWebRoutes(
   app.route("/", createHealthRoutes(accountPool));
   app.route("/", createUpdateRoutes());
   app.route("/", createConnectionRoutes(accountPool));
-  app.route("/", createSettingsRoutes(accountPool));
+  app.route("/", createSettingsRoutes(accountPool, getLanRuntime));
   app.route("/", createOllamaAdminRoutes());
   app.route("/", createUsageStatsRoutes(accountPool, usageStats));
   app.route("/", createLogRoutes());
   app.route("/", createErrorLogRoutes());
+  app.route("/", createPolicyGuardRoutes());
   if (clientKeyPool) {
     app.route(
       "/",
